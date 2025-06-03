@@ -1,0 +1,113 @@
+name: Run Script and Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Run start.sh
+      run: |
+        chmod +x ./start.sh
+        ./start.sh
+      
+    - name: Check for required files
+      run: |
+        required_files=(
+          "agent-freebsd_amd64"
+          "agent-linux_amd64"
+          "agent-linux_arm64"
+          "cff-linux-amd64"
+          "cff-linux-arm64"
+          "cff-freebsd-amd64"
+          "web-freebsd-amd64"
+          "web-linux-amd64"
+          "web-linux-arm64"
+          "sb-linux-amd64"
+          "sb-linux-arm64"
+          "sb-freebsd-amd64"
+          "board-linux-amd64"
+          "board-linux-arm64"
+          "gost-linux_amd64"
+          "gost-linux_arm64"
+          "frps-linux_amd64"
+          "frps-linux_arm64"
+          "frps-freebsd_amd64"
+          "cftun-linux-amd64"
+          "nodepass-linux_amd64"
+        )
+        
+        missing_files=0
+        for file in "${required_files[@]}"; do
+          if [ ! -f "./download/$file" ]; then
+            echo "Missing file: $file"
+            missing_files=$((missing_files + 1))
+          fi
+        done
+        
+        if [ $missing_files -gt 0 ]; then
+          echo "Error: $missing_files required files are missing. Aborting release."
+          exit 1
+        fi
+        
+        echo "All required files are present. Proceeding with release."
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: release-${{ github.run_number }}
+        release_name: Release ${{ github.run_number }}
+        draft: false
+        prerelease: false
+        
+    - name: Install jq and file
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq file
+        
+    - name: Upload Release Assets
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
+      run: |
+        set -x
+        assets_url=$(echo "$UPLOAD_URL" | sed -e "s/{?name,label}//g")
+        for asset in ./download/*; do
+          filename=$(basename "$asset")
+          encoded_filename=$(printf %s "$filename" | jq -sRr @uri)
+          mime_type=$(file -b --mime-type "$asset")
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Content-Type: $mime_type" \
+               --data-binary @"$asset" \
+               "${assets_url}?name=${encoded_filename}"
+        done
+        
+    - name: Delete old releases
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        releases=$(curl -H "Authorization: token $GITHUB_TOKEN" \
+                       -H "Accept: application/vnd.github.v3+json" \
+                       https://api.github.com/repos/${{ github.repository }}/releases \
+                       | jq -r '.[].id')
+
+        count=0
+        for release in $releases; do
+          count=$((count + 1))
+          if [ $count -gt 10 ]; then
+            curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+                          -H "Accept: application/vnd.github.v3+json" \
+                          https://api.github.com/repos/${{ github.repository }}/releases/$release
+          fi
+        done
