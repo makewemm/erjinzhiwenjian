@@ -1,0 +1,177 @@
+name: Build and Release Nezha v0 (Binary Release)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        default: 'v0.17.5'
+
+permissions:
+  contents: write
+
+jobs:
+  # FreeBSD Build
+  build-freebsd:
+    name: Build FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup and Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: 14.2
+          prepare: |
+            pkg update
+            pkg install -y wget curl git gcc bash jq node zip
+            fetch https://go.dev/dl/go1.22.0.freebsd-amd64.tar.gz
+            tar -C /usr/local -xzf go1.22.0.freebsd-amd64.tar.gz
+          run: |
+            export PATH=$PATH:/usr/local/go/bin
+            export GOPATH=$HOME/go
+            # ... [前续构建步骤保持不变] ...
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then VERSION=${{ github.event.inputs.tag }}; else VERSION=$(curl -sL "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name); fi
+            version_num=${VERSION#v}
+            git clone -b ${VERSION} https://github.com/naiba/nezha
+            cd nezha
+            # ... [处理前端、GeoIP、Swag等步骤保持不变] ...
+            cd cmd/dashboard
+            go mod tidy
+            # ... [确定VERSION_FLAG的逻辑保持不变] ...
+            if find ../../ -name "*.go" -exec grep -l "singleton.Version" {} \; | head -1 > /dev/null 2>&1; then VERSION_FLAG="-X github.com/naiba/nezha/service/singleton.Version=${version_num}"; else VERSION_FLAG="-X main.version=${version_num}"; fi
+            go build -ldflags "-s -w $VERSION_FLAG -extldflags '-static -fpic'" -trimpath -buildvcs=false || go build -ldflags "-s -w $VERSION_FLAG" -trimpath -buildvcs=false
+
+            echo "==================== 8 preparing output ========================" # <--- MODIFIED
+            mkdir -p ../../output
+            mv dashboard ../../output/nezha-dashboard-freebsd-amd64
+
+            # --- 移除了创建压缩包的步骤 --- # <--- MODIFIED
+
+            echo "Final output:"
+            ls -la ../../output
+
+      - name: Upload FreeBSD Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nezha-freebsd-amd64-binary # <--- MODIFIED (工件名)
+          path: nezha/output/nezha-dashboard-freebsd-amd64 # <--- MODIFIED (直接指向二进制文件)
+
+  # Linux Builds
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.22.0'
+      - name: Get Nezha version # ... [此部分及后续克隆步骤保持不变] ...
+        id: version
+        run: |
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then VERSION=${{ github.event.inputs.tag }}; else VERSION=$(curl -sL "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name); fi
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      - name: Clone Nezha # ...
+        run: git clone -b ${{ steps.version.outputs.version }} https://github.com/naiba/nezha
+      - name: Build Application
+        run: |
+          # ... [前续构建步骤保持不变] ...
+          version_num=${{ steps.version.outputs.version }}
+          version_num=${version_num#v}
+          cd nezha
+          # ... [处理前端、GeoIP、Swag等步骤保持不变] ...
+          cd cmd/dashboard
+          go mod tidy
+          export GOOS=linux
+          export GOARCH=${{ matrix.arch }}
+          export CGO_ENABLED=0
+          # ... [构建命令保持不变] ...
+          if grep -q "singleton.Version" ../../service/singleton/*.go 2>/dev/null; then go build -ldflags "-s -w -X github.com/naiba/nezha/service/singleton.Version=${version_num}" -trimpath -buildvcs=false; else go build -ldflags "-s -w -X main.version=${version_num}" -trimpath -buildvcs=false; fi
+
+          mkdir -p ../../output
+          mv dashboard ../../output/nezha-dashboard-linux-${{ matrix.arch }}
+
+          # --- 移除了创建压缩包的步骤 --- # <--- MODIFIED
+
+      - name: Upload Linux Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nezha-linux-${{ matrix.arch }}-binary # <--- MODIFIED (工件名)
+          path: nezha/output/nezha-dashboard-linux-${{ matrix.arch }} # <--- MODIFIED (直接指向二进制文件)
+
+  # IBM s390x Build
+  build-ibm-s390x:
+    name: Build IBM s390x
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.22.0'
+      - name: Get Nezha version # ... [此部分及后续克隆步骤保持不变] ...
+        id: version
+        run: |
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then VERSION=${{ github.event.inputs.tag }}; else VERSION=$(curl -sL "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name); fi
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      - name: Build for IBM s390x
+        run: |
+          # ... [前续构建步骤保持不变] ...
+          version_num=${{ steps.version.outputs.version }}
+          version_num=${version_num#v}
+          git clone -b ${{ steps.version.outputs.version }} https://github.com/naiba/nezha
+          cd nezha
+          # ... [处理前端、GeoIP、Swag等步骤保持不变] ...
+          cd cmd/dashboard
+          go mod tidy
+          export GOOS=linux
+          export GOARCH=s390x
+          export CGO_ENABLED=0
+          # ... [构建命令保持不变] ...
+          if grep -q "singleton.Version" ../../service/singleton/*.go 2>/dev/null; then go build -ldflags "-s -w -X github.com/naiba/nezha/service/singleton.Version=${version_num}" -trimpath -buildvcs=false; else go build -ldflags "-s -w -X main.version=${version_num}" -trimpath -buildvcs=false; fi
+
+          mkdir -p ../../output
+          mv dashboard ../../output/nezha-dashboard-linux-s390x
+
+          # --- 移除了创建压缩包的步骤 --- # <--- MODIFIED
+
+      - name: Upload IBM s390x Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nezha-linux-s390x-binary # <--- MODIFIED (工件名)
+          path: nezha/output/nezha-dashboard-linux-s390x # <--- MODIFIED (直接指向二进制文件)
+
+  # Release Job
+  release:
+    name: Create Release
+    needs: [build-freebsd, build-linux, build-ibm-s390x]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then VERSION=${{ github.event.inputs.tag }}; else VERSION=${{ github.ref_name }}; fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # 复制所有下载的工件（现在是二进制文件）到发布目录 <--- MODIFIED
+          # artifacts/ 目录下的结构是 <artifact-name>/<file-name>
+          cp -v artifacts/*/* release-assets/
+          echo "Assets to be released:"
+          ls -l release-assets/
+
+      - name: Create Release with Binaries
+        uses: ncipollo/release-a
